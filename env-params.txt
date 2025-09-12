@@ -1,4 +1,2 @@
 # name | javaVersion | jvmArgs | appArgs
 local-java17 | 17 | -Xmx512m -Dconfig=dev.properties | --server.port=8080
-ci-java11     | 11 | -Xmx1g | --run-mode=ci
-legacy        | 8  | -Xms256m |
