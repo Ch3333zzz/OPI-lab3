@@ -1,0 +1,5 @@
+host=se.ifmo.ru
+port=2222
+user=s408815
+remote_dir=/home/studs/s408815
+password=cNLI$3197

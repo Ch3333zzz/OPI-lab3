@@ -1,0 +1,1169 @@
+import org.xml.sax.helpers.DefaultHandler
+import javax.xml.parsers.SAXParserFactory
+import groovy.io.FileType
+import java.security.MessageDigest
+
+plugins {
+    id 'java'
+    id 'war'
+}
+
+group 'org.ifmo.ru'
+version '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    sourceDir = project.hasProperty('sourceDir') ? project.sourceDir : 'src/main/java'
+    outputDir = project.hasProperty('outputDir') ? project.outputDir : 'build/classes/main'
+    fileEncoding = project.hasProperty('fileEncoding') ? project.fileEncoding : 'UTF-8'
+    javaVersion = project.hasProperty('javaVersion') ? project.javaVersion : '17'
+}
+
+sourceCompatibility = javaVersion
+targetCompatibility = javaVersion
+
+tasks.withType(JavaCompile) {
+    options.encoding = fileEncoding
+}
+
+dependencies {
+    implementation 'com.google.code.gson:gson:2.10.1'
+    implementation 'org.mindrot:jbcrypt:0.4'
+    implementation 'com.fasterxml.jackson.jaxrs:jackson-jaxrs-json-provider:2.17.0'
+    implementation 'org.eclipse:yasson:3.0.3'
+    implementation 'org.glassfish:jakarta.json:2.0.1'
+
+    compileOnly 'jakarta.ws.rs:jakarta.ws.rs-api:3.1.0'
+    compileOnly 'jakarta.persistence:jakarta.persistence-api:3.1.0'
+    compileOnly 'jakarta.ejb:jakarta.ejb-api:4.0.0'
+    compileOnly 'jakarta.annotation:jakarta.annotation-api:2.1.1'
+    compileOnly 'jakarta.platform:jakarta.jakartaee-api:10.0.0'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.10.0'
+    testImplementation 'jakarta.persistence:jakarta.persistence-api:3.1.0'
+    testImplementation 'org.junit.jupiter:junit-jupiter-engine:5.10.0'
+    testImplementation 'org.glassfish.jersey.core:jersey-common:3.0.8'
+    testImplementation 'org.glassfish.jersey.inject:jersey-hk2:3.0.8'
+    testImplementation 'com.microsoft.playwright:playwright:1.55.0'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+    testImplementation 'org.mockito:mockito-core:5.16.1'
+    testImplementation 'org.mockito:mockito-junit-jupiter:5.16.1'
+}
+
+def runCommand(List<String> cmd, File workingDir = projectDir, boolean captureOutput = true) {
+    def pb = new ProcessBuilder(cmd)
+    pb.directory(workingDir)
+    pb.redirectErrorStream(true)
+    def proc = pb.start()
+    def output = ''
+    if (captureOutput) {
+        def baos = new ByteArrayOutputStream()
+        proc.inputStream.transferTo(baos)
+        proc.waitFor()
+        output = baos.toString('UTF-8')
+    } else {
+        proc.waitFor()
+    }
+    return [exit: proc.exitValue(), out: output.trim()]
+}
+
+tasks.register('doc') {
+    group = 'verification'
+    description = 'Generate checksums (MD5 & SHA-1) for project files and write checksums-md5.txt/checksums-sha1.txt'
+
+    doLast {
+        def toHex = { byte[] bytes -> bytes.collect { String.format('%02x', it & 0xff) }.join() }
+
+        def includes = ['**/*']
+        def excludes = ['build/**', '.gradle/**', '.git/**', '**/*.class', '**/target/**']
+
+        def files = fileTree(dir: projectDir).matching {
+            include includes
+            exclude excludes
+        }.files.sort { a, b -> a.path <=> b.path }
+
+        def outDir = file("${buildDir}/archives/checksums")
+        outDir.mkdirs()
+
+        def md5File = new File(outDir, 'checksums-md5.txt')
+        def sha1File = new File(outDir, 'checksums-sha1.txt')
+
+        md5File.withWriter('UTF-8') { md5Writer ->
+            sha1File.withWriter('UTF-8') { sha1Writer ->
+                files.each { f ->
+                    if (f.isFile()) {
+                        def bytes = f.bytes
+                        def md5 = MessageDigest.getInstance('MD5').digest(bytes)
+                        def sha1 = MessageDigest.getInstance('SHA-1').digest(bytes)
+                        def md5hex = toHex(md5)
+                        def sha1hex = toHex(sha1)
+                        def rel = projectDir.toPath().relativize(f.toPath()).toString().replace('\\', '/')
+                        md5Writer.println("${md5hex}  ${rel}")
+                        sha1Writer.println("${sha1hex}  ${rel}")
+                    }
+                }
+            }
+        }
+
+        def concat = md5File.readLines('UTF-8').join('\n')
+        def aggMd5 = toHex(MessageDigest.getInstance('MD5').digest(concat.getBytes('UTF-8')))
+        def aggSha1 = toHex(MessageDigest.getInstance('SHA-1').digest(concat.getBytes('UTF-8')))
+
+        project.ext.projectMd5 = aggMd5
+        project.ext.projectSha1 = aggSha1
+
+        println "Generated ${md5File.absolutePath} and ${sha1File.absolutePath}"
+        println "Project aggregate MD5: ${aggMd5}"
+        println "Project aggregate SHA-1: ${aggSha1}"
+    }
+}
+
+tasks.register('javadocJar', Jar) {
+    group = 'documentation'
+    description = 'Package generated javadoc into a jar with classifier javadoc'
+    dependsOn tasks.named('javadoc')
+    archiveClassifier.set('javadoc')
+    from tasks.named('javadoc').flatMap { it.destinationDir }
+}
+
+tasks.register('compile', JavaCompile) {
+    description = '---Compiling the project source codes---'
+    group = 'Build'
+
+    source = fileTree(dir: sourceDir, include: '**/*.java')
+    destinationDirectory = file(outputDir)
+    classpath = sourceSets.main.compileClasspath
+    options.encoding = fileEncoding
+
+    doLast {
+        println "Compilation complete. Classes in: ${outputDir}"
+        println "Compiled  ${source.size()} files"
+    }
+}
+
+clean {
+    group = 'Build'
+    description = '---Removing compiled classes and temporary files---'
+
+    doLast {
+        def dirsToDelete = [
+                'out',
+                'tmp'
+        ]
+
+        dirsToDelete.each { dir ->
+            def dirFile = file(dir)
+            if (dirFile.exists()) {
+                delete dirFile
+                println ">Deleted directory: ${dirFile.absolutePath}"
+            }
+        }
+
+        def filesToDelete = fileTree(dir: '.').matching {
+            include '*.log'
+            include '*.tmp'
+            include '*.class'
+            include '**/*.iml'
+        }
+
+        filesToDelete.each { file ->
+            delete file
+            println "===>Deleted file: ${file.absolutePath}"
+        }
+
+        println "===The project has been cleaned==="
+    }
+}
+
+def packageType = project.hasProperty('packageType') ? project.property('packageType').toString().toLowerCase() : 'war'
+def mainClassName = project.hasProperty('mainClass') ? project.property('mainClass').toString() : null
+
+
+tasks.named('war') {
+    dependsOn 'compile'
+    dependsOn 'doc'
+    dependsOn 'javadoc'
+
+    from("${buildDir}/archives/checksums") { into 'docs/checksums' }
+    from(tasks.named('javadoc')) { into 'docs/javadoc' }
+
+    manifest {
+        attributes('Implementation-Title': project.name, 'Implementation-Version': project.version,
+                'Project-MD5': project.hasProperty('projectMd5') ? project.projectMd5 : 'UNKNOWN',
+                'Project-SHA1': project.hasProperty('projectSha1') ? project.projectSha1 : 'UNKNOWN')
+    }
+}
+
+tasks.register('buildCustom') {
+    group = 'build'
+    description = "Compile sources via 'compile' and package"
+
+    dependsOn 'compile'
+
+    dependsOn 'war'
+
+    doLast {
+        println "Build finished. WAR location: ${buildDir}/libs/${project.name}-${project.version}.war"
+    }
+}
+
+if (!tasks.findByName('build')) {
+    tasks.register('build') {
+        dependsOn 'buildCustom'
+    }
+} else {
+    tasks.named('build') {
+        dependsOn 'buildCustom'
+    }
+}
+
+tasks.register('xml') {
+    group = 'Verification'
+    description = 'Валидация всех XML-файлов в проекте'
+
+    doLast {
+        def xmlFiles = fileTree(dir: projectDir).matching {
+            include '**/*.xml'
+            exclude 'build/**', '.gradle/**', '**/target/**'
+        }
+
+        def errorCount = 0
+        def totalFiles = 0
+
+        xmlFiles.each { xmlFile ->
+            totalFiles++
+            try {
+                def factory = SAXParserFactory.newInstance()
+                factory.setValidating(true)
+                factory.setNamespaceAware(true)
+                def parser = factory.newSAXParser()
+                parser.parse(xmlFile, new DefaultHandler())
+                println "${xmlFile} - valide"
+            } catch (Exception e) {
+                errorCount++
+                println "is not valid"
+                println "   ${e.message}"
+                if (e instanceof org.xml.sax.SAXParseException) {
+                    def saxError = (org.xml.sax.SAXParseException) e
+                    println " Stroke: ${saxError.lineNumber}, Column: ${saxError.columnNumber}"
+                }
+            }
+        }
+
+        println "=========================================="
+        println "Filed analyzed: $totalFiles"
+        println "Valid: ${totalFiles - errorCount}"
+        println "not Valid: $errorCount"
+        println "=========================================="
+
+        if (errorCount > 0) {
+            throw new GradleException("Found $errorCount XML-files with error")
+        }
+    }
+}
+
+tasks.register('Test') {
+    group = 'Verification'
+    description = 'Run build and then tests'
+    dependsOn 'build', 'test'
+    doLast {
+        println "Build + tests finished. Check reports in ${layout.buildDirectory.dir('reports/tests').get().asFile}"
+    }
+}
+
+tasks.register('installPlaywrightBrowsers', JavaExec) {
+    group = 'verification'
+    description = 'Install Playwright browser (Chromium)'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass.set('com.microsoft.playwright.CLI')
+    args = ['install', 'chromium']
+}
+
+test {
+    useJUnitPlatform { }
+    testLogging {
+        events "passed", "skipped", "failed", "standardOut", "standardError"
+        exceptionFormat "full"
+        showExceptions true
+        showCauses true
+        showStackTraces true
+    }
+
+    reports {
+        html.required.set(true)
+        junitXml.required.set(true)
+        junitXml.outputLocation.set(layout.buildDirectory.dir("reports/tests/xml"))
+    }
+
+    afterSuite { desc, result ->
+        if (!desc.parent) {
+            println "\nTest Results:"
+            println "Passed: ${result.successfulTestCount}"
+            println "Skipped: ${result.skippedTestCount}"
+            println "Failed: ${result.failedTestCount}"
+            println "Total: ${result.testCount}"
+
+            if (result.failedTestCount > 0) {
+                throw new GradleException("${result.failedTestCount} tests failed!")
+            }
+        }
+    }
+}
+
+tasks.register('installChrome', JavaExec) {
+    group = 'verification'
+    description = 'Install Chrome for Playwright'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass.set('com.microsoft.playwright.CLI')
+    args = ['install', 'chrome']
+}
+
+tasks.named('installPlaywrightBrowsers') {
+    dependsOn 'installChrome'
+}
+
+tasks.register('playMusic') {
+    group = 'Build'
+    description = 'Open music file with system default application (cross-platform)'
+
+    doLast {
+        def f = file('sounds/music.wav')
+        if (!f.exists()) {
+            println "File not found: ${f.absolutePath}"
+            return
+        }
+
+        try {
+            if (java.awt.Desktop.isDesktopSupported()) {
+                try {
+                    java.awt.Desktop.getDesktop().open(f)
+                    println "Opened via Desktop: ${f.absolutePath}"
+                    return
+                } catch (Exception e) {
+                    println "Desktop.open failed: ${e.message} — will try native command"
+                }
+            }
+
+            def os = System.getProperty('os.name').toLowerCase()
+            List cmd
+            if (os.contains('win')) {
+                cmd = ['cmd', '/c', 'start', '""', "\"${f.absolutePath}\""]
+            } else if (os.contains('mac')) {
+                cmd = ['open', f.absolutePath]
+            } else {
+                cmd = ['xdg-open', f.absolutePath]
+            }
+
+            println "Running: ${cmd.join(' ')}"
+            new ProcessBuilder(cmd).inheritIO().start()
+            println "Command started, file should open in your system player."
+        } catch (Exception ex) {
+            println "Cannot open file: ${ex.class.name}: ${ex.message}"
+        }
+    }
+}
+
+tasks.named('buildCustom') {
+    finalizedBy 'playMusic'
+}
+
+tasks.register('report') {
+    group = 'Reporting'
+    description = 'Save JUnit report as XML, add to git and commit'
+
+    mustRunAfter test
+
+    doLast {
+        try {
+            def testReportDir = layout.buildDirectory.dir('reports/tests').get().asFile
+            if (!testReportDir.exists()) {
+                println "Test reports directory does not exist: ${testReportDir.absolutePath}"
+                return
+            }
+
+            def xmlReports = fileTree(dir: testReportDir, includes: ['**/xml/**/*.xml', '**/*.xml'])
+            if (xmlReports.isEmpty()) {
+                println "No JUnit XML reports found in: ${testReportDir.absolutePath}"
+                return
+            }
+
+            def targetDir = file('test-reports')
+            if (!targetDir.exists()) {
+                targetDir.mkdirs()
+                println "Created target directory: ${targetDir.absolutePath}"
+            }
+
+            def copiedFiles = []
+            xmlReports.each { reportFile ->
+                def relativePath = projectDir.toPath().relativize(reportFile.toPath())
+                def targetFile = new File(targetDir, relativePath.toString())
+                targetFile.parentFile.mkdirs()
+
+                reportFile.withInputStream { input ->
+                    targetFile.withOutputStream { output ->
+                        output << input
+                    }
+                }
+                copiedFiles.add(targetFile)
+                println "Copied report: ${targetFile.absolutePath}"
+            }
+
+            if (copiedFiles.size() > 0) {
+                def gitStatusExec = runCommand(['git', 'status', '--porcelain'], projectDir)
+                if (gitStatusExec.exit == 0) {
+                    runCommand(['git', 'add', targetDir.absolutePath], projectDir)
+                    println "Added reports to Git"
+
+                    def gitDiffExec = runCommand(['git', 'diff', '--cached', '--quiet', '--exit-code'], projectDir)
+                    if (gitDiffExec.exit != 0) {
+                        def commitMessage = "Add test reports - ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
+                        runCommand(['git', 'commit', '-m', commitMessage], projectDir)
+                        println "Committed reports with message: '${commitMessage}'"
+                    } else {
+                        println "No changes to commit"
+                    }
+                } else {
+                    println "Not a Git repository, skipping Git operations"
+                }
+            }
+
+            println "Report task completed successfully"
+
+        } catch (Exception e) {
+            println "Failed to complete report task: ${e.message}"
+        }
+    }
+}
+
+tasks.named('test') {
+    finalizedBy 'report'
+}
+
+def findGradleCmd() {
+    def os = System.getProperty('os.name').toLowerCase()
+    if (project.file('gradlew').exists()) {
+        return os.contains('win') ? 'gradlew.bat' : './gradlew'
+    }
+    return 'gradle'
+}
+
+tasks.register('history') {
+    group = 'verification'
+    description = 'If compile fails: iterate git history until compile succeeds; save diff for commit or working changes that broke the build.'
+
+    doLast {
+        def runGit = { List<String> args ->
+            def res = runCommand(args, projectDir)
+            return [exit: res.exit, out: res.out]
+        }
+
+        def rev = runGit(['git', 'rev-list', '--reverse', 'HEAD'])
+        if (rev.exit != 0 || rev.out == '') {
+            throw new GradleException('Not a git repository or no commits found. Aborting history task.')
+        }
+        def commits = rev.out.split('\n') as List
+
+        def origCommitRes = runGit(['git', 'rev-parse', 'HEAD'])
+        def origCommit = origCommitRes.out
+        println "Original HEAD: ${origCommit}"
+
+        def status = runGit(['git', 'status', '--porcelain']).out
+        def stashCreated = false
+        def stashPatch = ''
+        if (status) {
+            println 'Local changes detected — creating git stash...'
+            def s = runGit(['git', 'stash', 'push', '-u', '-m', "gradle-history-autostash-${System.currentTimeMillis()}"])
+            if (s.exit == 0) {
+                stashCreated = true
+                def sp = runGit(['git', 'stash', 'show', '-p'])
+                stashPatch = sp.out ?: ''
+                println 'Stash created (patch captured).'
+            } else {
+                println "Failed to create stash: ${s.out}"
+            }
+        } else {
+            println 'No local changes to stash.'
+        }
+
+        def currentIndex = commits.indexOf(origCommit)
+        if (currentIndex == -1) currentIndex = commits.size() - 1
+        println "Commits count: ${commits.size()}, starting from index ${currentIndex}"
+
+        def lastWorkingCommit = null
+        def lastWorkingIndex = -1
+        def gradleCmd = findGradleCmd()
+
+        for (int i = currentIndex; i >= 0; i--) {
+            def commit = commits[i]
+            println "Checking out ${commit} (${i})"
+            def co = runGit(['git', 'checkout', '--quiet', commit])
+            if (co.exit != 0) {
+                println "Failed to checkout ${commit}: ${co.out}"
+                continue
+            }
+
+            println "Running '${gradleCmd} compile' for ${commit} ..."
+            def gradleOut = runCommand([gradleCmd, 'compile', '--no-daemon', '--console=plain'], projectDir)
+            if (gradleOut.exit == 0) {
+                lastWorkingCommit = commit
+                lastWorkingIndex = i
+                println "Compile succeeded at ${commit}"
+                break
+            } else {
+                println "Compile failed at ${commit} (exit ${gradleOut.exit})."
+            }
+        }
+
+        if (lastWorkingCommit == null) {
+            println 'No working revision found in history. Restoring original HEAD...'
+            runGit(['git', 'checkout', '--quiet', origCommit])
+            if (stashCreated) {
+                println 'Restoring stash...'
+                runGit(['git', 'stash', 'pop'])
+            }
+            throw new GradleException('No working revision found in history.')
+        }
+
+        def historyDir = file("${buildDir}/archives/history")
+        historyDir.mkdirs()
+
+        if (stashCreated) {
+            def stamp = System.currentTimeMillis()
+            def diffFile = new File(historyDir, "diff-working-${stamp}.patch")
+            diffFile.withWriter('UTF-8') { it << stashPatch }
+            println "Saved patch of working tree (stash) to: ${diffFile.absolutePath}"
+        } else {
+            if (lastWorkingIndex == commits.size() - 1) {
+                println 'No subsequent commit found after last working revision; nothing to diff.'
+            } else {
+                def badIndex = lastWorkingIndex + 1
+                if (badIndex < commits.size()) {
+                    def badCommit = commits[badIndex]
+                    def diffRes = runGit(['git', 'diff', lastWorkingCommit, badCommit])
+                    def diffFile = new File(historyDir, "diff-${badCommit}.patch")
+                    diffFile.withWriter('UTF-8') { it << diffRes.out }
+                    println "Saved diff of breaking commit ${badCommit} to ${diffFile.absolutePath}"
+                } else {
+                    println 'Could not determine bad commit to diff.'
+                }
+            }
+        }
+
+        runGit(['git', 'checkout', '--quiet', origCommit])
+        if (stashCreated) {
+            println 'Applying previously created stash (pop)...'
+            runGit(['git', 'stash', 'pop'])
+        }
+
+        println 'History task finished.'
+    }
+}
+
+gradle.taskGraph.afterTask { Task task, TaskState state ->
+    if (task.name == 'compile' && state.failure != null) {
+        println "Detected failure of 'compile' — invoking 'history' in a separate Gradle process..."
+        def gradleCmd = findGradleCmd()
+        runCommand([gradleCmd, 'history'], projectDir)
+    }
+}
+
+tasks.register('team') {
+    group = 'Team'
+    description = 'Get 3 previous revisions from git, build each by invoking the "build" Gradle task in a worktree, collect resulting jars and pack into a zip.'
+
+    doLast {
+        try {
+            def gitStatusOut = runCommand(['git', 'status'], projectDir)
+            if (gitStatusOut.exit != 0 || gitStatusOut.out.toLowerCase().contains('not a git repository')) {
+                throw new GradleException('Not a git repository. Cannot execute team task.')
+            }
+
+            def gitLogOut = runCommand(['git', 'log', '-n', '4', '--pretty=format:%H'], projectDir)
+            def commits = gitLogOut.out.trim().split('\n') as List
+
+            if (commits.size() < 4) {
+                throw new GradleException("Not enough commits (need at least 4 commits to get 3 previous revisions). Found: ${commits.size()}")
+            }
+
+            def targetCommits = commits[1..3]
+
+            def worktreeParentDir = file("${buildDir}/team-worktrees")
+            worktreeParentDir.mkdirs()
+            def jarsDir = file("${buildDir}/team-jars")
+            jarsDir.mkdirs()
+
+            def worktreeDirs = []
+            def collectedJars = []
+            def gradleCmd = findGradleCmd()
+
+            try {
+                targetCommits.eachWithIndex { commit, index ->
+                    def shortId = commit.substring(0, Math.min(7, commit.length()))
+                    def worktreeDir = new File(worktreeParentDir, "commit-${shortId}")
+                    worktreeDirs << worktreeDir
+
+                    println "Creating worktree for commit ${shortId} in ${worktreeDir}"
+                    def addRes = runCommand(['git', 'worktree', 'add', worktreeDir.absolutePath, commit], projectDir)
+                    if (addRes.exit != 0) {
+                        println "Warning: git worktree add returned ${addRes.exit} for ${commit}. Skipping this revision."
+                        return
+                    }
+
+                    println "Building revision ${index + 1}/3: ${shortId} (running '${gradleCmd} build')"
+                    def buildRes = runCommand([gradleCmd, 'build', '--no-daemon', '--console=plain'], worktreeDir)
+                    if (buildRes.exit != 0) {
+                        println "Warning: build failed for ${shortId} (exit=${buildRes.exit}). Continuing with next revision."
+                    }
+
+                    def sourceJarDir = new File(worktreeDir, 'build/libs')
+                    if (sourceJarDir.exists()) {
+                        sourceJarDir.eachFileMatch(FileType.FILES, ~/.*\.jar/) { jarFile ->
+                            def targetJarFile = new File(jarsDir, "revision-${index}-${shortId}-${jarFile.name}")
+                            jarFile.withInputStream { input ->
+                                targetJarFile.withOutputStream { output ->
+                                    output << input
+                                }
+                            }
+                            collectedJars << targetJarFile
+                            println "Copied ${jarFile.name} -> ${targetJarFile.name}"
+                        }
+                    } else {
+                        println "No build/libs directory for ${shortId} (maybe build failed)."
+                    }
+                }
+
+                if (collectedJars.size() > 0) {
+                    def zipFile = file("${buildDir}/team-revisions.zip")
+                    ant.zip(destfile: zipFile) {
+                        fileset(dir: jarsDir)
+                    }
+
+                    println "Team task completed successfully"
+                    println "Zip archive created at: ${zipFile.absolutePath}"
+                    println "Included ${collectedJars.size()} jar files from ${targetCommits.size()} revisions"
+                } else {
+                    println "No jar files were collected from any revision."
+                }
+
+            } finally {
+                worktreeDirs.each { dir ->
+                    if (dir.exists()) {
+                        try {
+                            runCommand(['git', 'worktree', 'remove', dir.absolutePath, '--force'], projectDir)
+                        } catch (Exception e) {
+                            println "Warning: Could not remove worktree ${dir}: ${e.message}"
+                        }
+                    }
+                }
+
+                try { worktreeParentDir.deleteDir() } catch (ignored) {}
+                try { jarsDir.deleteDir() } catch (ignored) {}
+            }
+
+        } catch (Exception e) {
+            throw new GradleException("Failed to complete team task: ${e.message}", e)
+        }
+    }
+}
+
+tasks.register('alt') {
+    group = 'Build'
+    description = 'Create alternative version (variable and class names +1) and run build on it.'
+
+    doLast {
+        def altProjectDir = file("${buildDir}/alt-project")
+        if (altProjectDir.exists()) altProjectDir.deleteDir()
+        altProjectDir.mkdirs()
+
+        println "Creating alternative project copy at: ${altProjectDir.absolutePath}"
+
+        ant.copy(todir: altProjectDir) {
+            fileset(dir: projectDir) {
+                include(name: '**/*')
+                exclude(name: 'build/**')
+                exclude(name: '.gradle/**')
+                exclude(name: '.git/**')
+                exclude(name: '**/*.iml')
+            }
+        }
+
+        def javaFiles = []
+        def srcRoot = new File(altProjectDir, 'src')
+        if (srcRoot.exists()) {
+            srcRoot.eachFileRecurse(FileType.FILES) { f ->
+                if (f.name.endsWith('.java')) javaFiles << f
+            }
+        }
+
+        def javaKeywords = [
+                'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char', 'class',
+                'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'final',
+                'finally', 'float', 'for', 'goto', 'if', 'implements', 'import', 'instanceof', 'int',
+                'interface', 'long', 'native', 'new', 'package', 'private', 'protected', 'public',
+                'return', 'short', 'static', 'strictfp', 'super', 'switch', 'synchronized', 'this',
+                'throw', 'throws', 'transient', 'try', 'void', 'volatile', 'while', 'true', 'false', 'null'
+        ]
+
+        def commonMethods = ['toString', 'equals', 'hashCode', 'getClass', 'notify', 'notifyAll', 'wait']
+        def standardClasses = ['String', 'System', 'Object', 'Integer', 'Double', 'Float', 'Long', 'Boolean']
+
+        def safeRename = { String name ->
+            if (javaKeywords.contains(name) || commonMethods.contains(name) || standardClasses.contains(name)) {
+                return name
+            }
+            return name + '1'
+        }
+
+        javaFiles.each { f ->
+            def content = f.getText('UTF-8')
+
+            content = content.replaceAll(/\b(class|interface|enum)\s+([A-Z][A-Za-z0-9_]*)\b/) { match ->
+                def keyword = match[1]
+                def className = match[2]
+                "$keyword ${safeRename(className)}"
+            }
+
+            content = content.replaceAll(/\b([A-Za-z_][A-Za-z0-9_<>\[\]]+)\s+([a-z][A-Za-z0-9_]*)\s*([,;=)]|$)/) { match ->
+                def type = match[1]
+                def varName = match[2]
+                def punctuation = match[3]
+                "$type ${safeRename(varName)}$punctuation"
+            }
+
+            content = content.replaceAll(/\b([a-z][A-Za-z0-9_]*)\b(?!\.|\(\))()/) { match ->
+                def varName = match[1]
+                safeRename(varName)
+            }
+
+            f.write(content, 'UTF-8')
+        }
+
+        javaFiles.each { f ->
+            def content = f.getText('UTF-8')
+            def matcher = content =~ /\bclass\s+([A-Z][A-Za-z0-9_]*)/
+            if (matcher.find()) {
+                def className = matcher.group(1)
+                if (!javaKeywords.contains(className) && !standardClasses.contains(className)) {
+                    def newFileName = safeRename(className) + '.java'
+                    def newFile = new File(f.parentFile, newFileName)
+                    if (f.renameTo(newFile)) {
+                        println "Renamed ${f.name} to ${newFile.name}"
+                    }
+                }
+            }
+        }
+
+        def gradleCmd = findGradleCmd()
+        def buildOut = runCommand([gradleCmd, 'build', '--no-daemon', '--console=plain'], altProjectDir)
+        println buildOut.out
+
+        def altLibsDir = new File(altProjectDir, 'build/libs')
+        def targetDir = file("${buildDir}/alt-jars")
+        targetDir.mkdirs()
+
+        if (altLibsDir.exists()) {
+            altLibsDir.eachFileMatch(FileType.FILES, ~/.*\.jar/) { jarFile ->
+                def target = new File(targetDir, "alt-${jarFile.name}")
+                jarFile.withInputStream { input -> target.withOutputStream { out -> out << input } }
+                println "Copied alt jar: ${target.absolutePath}"
+            }
+        }
+
+        if (buildOut.exit != 0) {
+            println "Alternative build completed with errors, but jars were collected if any were created"
+        } else {
+            println "Alternative build completed successfully"
+        }
+
+        println "Alt task finished. Alternative jars are in: ${targetDir.absolutePath}"
+    }
+}
+
+tasks.register('diff') {
+    group = 'verification'
+    description = "Check git working copy; if changes don't touch classes/paths from params file, git add & commit them."
+
+    doLast {
+        def runGit = { List<String> args ->
+            def res = runCommand(args, projectDir)
+            return [exit: res.exit, out: res.out]
+        }
+
+        def paramsFilePath = project.hasProperty('diffParamsFile') ? project.property('diffParamsFile').toString() : 'diff-params.txt'
+        def paramsFile = file(paramsFilePath)
+        def commitMessage = project.hasProperty('diffCommitMessage') ? project.property('diffCommitMessage').toString() : "Auto-commit: workspace changes - ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
+        def noCommit = project.hasProperty('diffNoCommit') && project.property('diffNoCommit').toString().toLowerCase() == 'true'
+
+        def statusChk = runGit(['git', 'rev-parse', '--is-inside-work-tree'])
+        if (statusChk.exit != 0 || statusChk.out != 'true') {
+            println "Not a git repository or git not available. Aborting diff task."
+            return
+        }
+
+        def unstaged = runGit(['git', 'diff', '--name-only']).out
+        def staged = runGit(['git', 'diff', '--name-only', '--cached']).out
+        def untracked = runGit(['git', 'ls-files', '--others', '--exclude-standard']).out
+
+        def changedSet = [] as Set
+        [unstaged, staged, untracked].each { s ->
+            if (s) {
+                s.split('\n').each { line ->
+                    def t = line?.trim()
+                    if (t) changedSet << t.replaceAll('\\\\', '/')
+                }
+            }
+        }
+
+        if (changedSet.isEmpty()) {
+            println "No changes detected in working copy. Nothing to commit."
+            return
+        }
+
+        println "Detected changed files (${changedSet.size()}):"
+        changedSet.each { println "  - ${it}" }
+
+        def watchedPaths = [] as Set
+        def watchedSimpleNames = [] as Set
+        if (paramsFile.exists()) {
+            paramsFile.eachLine('UTF-8') { line ->
+                def ln = line.trim()
+                if (!ln || ln.startsWith('#')) return
+                def norm = ln.replaceAll('\\\\', '/')
+                if (norm.contains('/') || norm.endsWith('.java')) {
+                    watchedPaths << norm
+                } else {
+                    def simple = norm.contains('.') ? norm.tokenize('.').last() : norm
+                    watchedSimpleNames << simple
+                }
+            }
+            println "Using params file: ${paramsFile.absolutePath}"
+            println "Watched simple class names: ${watchedSimpleNames}"
+            println "Watched path entries: ${watchedPaths}"
+        } else {
+            println "Params file '${paramsFilePath}' not found — treating as empty (no watched classes)."
+        }
+
+        def conflicting = [] as Set
+        changedSet.each { changed ->
+            def changedName = new File(changed).name
+            def base = changedName.contains('.') ? changedName.substring(0, changedName.lastIndexOf('.')) : changedName
+            if (watchedSimpleNames.contains(base)) {
+                conflicting << changed
+            }
+            watchedPaths.each { wp ->
+                if (changed == wp || changed.endsWith(wp) || wp.endsWith(changed)) {
+                    conflicting << changed
+                }
+            }
+        }
+
+        if (!conflicting.isEmpty()) {
+            println "\nFound changes touching watched classes/paths — auto-commit aborted."
+            println "Conflicting files:"
+            conflicting.each { println "  - ${it}" }
+            println "If you want to force commit despite these changes, remove the corresponding lines from '${paramsFilePath}' or edit the file."
+            return
+        }
+
+        println "\nNo conflicts with watched classes. Proceeding to git add & commit (unless diffNoCommit=true)."
+
+        if (noCommit) {
+            println "diffNoCommit=true => dry run. Skipping actual git add & commit."
+            return
+        }
+
+        def addRes = runGit(['git', 'add', '-A'])
+        if (addRes.exit != 0) {
+            println "git add failed: ${addRes.out}"
+            return
+        }
+
+        def stagedAfter = runGit(['git', 'diff', '--cached', '--name-only']).out
+        if (!stagedAfter) {
+            println "No staged changes after git add — nothing to commit."
+            return
+        }
+
+        println "Staged files to commit:"
+        stagedAfter.split('\n').each { println "  - ${it}" }
+
+        def commitRes = runGit(['git', 'commit', '-m', commitMessage])
+        if (commitRes.exit == 0) {
+            println "Commit successful: ${commitMessage}"
+        } else {
+            println "git commit failed (exit ${commitRes.exit}). Output:"
+            println commitRes.out
+        }
+    }
+}
+
+tasks.register('env') {
+    group = 'verification'
+    description = "Build and run the project's main class in alternative environments. Params file format described below."
+
+    dependsOn 'compile'
+
+    doLast {
+        def paramsFilePath = project.hasProperty('envParamsFile') ? project.property('envParamsFile').toString() : 'env-params.txt'
+        def paramsFile = file(paramsFilePath)
+        def dryRun = project.hasProperty('envDryRun') && project.property('envDryRun').toString().toLowerCase() == 'true'
+        def defaultMain = project.hasProperty('mainClass') ? project.property('mainClass').toString() : (binding.hasVariable('mainClassName') ? mainClassName : null)
+
+        if (!defaultMain) {
+            println "No main class configured. Provide -PmainClass=your.MainClass or set 'mainClass' project property."
+            return
+        }
+
+        if (!paramsFile.exists()) {
+            println "Params file not found: ${paramsFile.absolutePath}"
+            println "Create file with example content (see task help)."
+            return
+        }
+
+        def toolchains = null
+        def JavaLanguageVersion = null
+        try {
+            toolchains = project.extensions.findByName('javaToolchains') ?: project.javaToolchains
+            JavaLanguageVersion = org.gradle.jvm.toolchain.JavaLanguageVersion
+        } catch (Exception ignored) {}
+
+        println "Using params file: ${paramsFile.absolutePath}"
+        def lines = paramsFile.readLines('UTF-8').collect { it.trim() }.findAll { it && !it.startsWith('#') }
+
+        if (lines.isEmpty()) {
+            println "No environment entries found in ${paramsFilePath}"
+            return
+        }
+
+        int idx = 0
+        lines.each { line ->
+            idx++
+
+            def parts = line.split(/\|/, -1).collect { it?.trim() ?: '' }
+
+            def envName = parts.size() > 0 && parts[0] ? parts[0] : "env-${idx}"
+            def javaVer = parts.size() > 1 && parts[1] ? parts[1] : ''
+            def jvmArgs = parts.size() > 2 && parts[2] ? parts[2].tokenize() : []
+            def appArgs = parts.size() > 3 && parts[3] ? parts[3].tokenize() : []
+
+            println "\n=== ENV: ${envName} ==="
+            println "Requested Java: ${javaVer ?: 'default system Java'}"
+            println "JVM args: ${jvmArgs}"
+            println "App args: ${appArgs}"
+
+            if (dryRun) {
+                println "(dry run) Skipping actual javaexec for ${envName}"
+                return
+            }
+
+            try {
+                project.javaexec { spec ->
+                    spec.main = defaultMain
+                    spec.classpath = sourceSets.main.runtimeClasspath
+                    if (jvmArgs) spec.jvmArgs = jvmArgs
+                    if (appArgs) spec.args = appArgs
+
+                    if (javaVer && toolchains != null && JavaLanguageVersion != null) {
+                        try {
+                            def verNum = javaVer.isInteger() ? Integer.parseInt(javaVer) : Integer.parseInt(javaVer.replaceAll('[^0-9]', ''))
+                            spec.javaLauncher = toolchains.launcherFor { languageVersion = JavaLanguageVersion.of(verNum) }
+                            println "Launched with toolchain Java ${verNum} (if available)"
+                        } catch (Exception e) {
+                            println "Could not obtain toolchain launcher for Java '${javaVer}': ${e.message}"
+                            println "Falling back to Gradle's default java for execution."
+                        }
+                    }
+
+                    spec.standardOutput = System.out
+                    spec.errorOutput = System.err
+                }
+
+                println "Finished run for ${envName}"
+            } catch (Exception e) {
+                println "Run failed for ${envName}: ${e.class.name}: ${e.message}"
+            }
+        }
+    }
+}
+
+tasks.register('native2ascii') {
+    group = 'verification'
+    description = "Convert .properties (UTF-8) -> ASCII-escaped copies (\\uXXXX). " +
+            "Options: -Pnative2asciiSrcDir, -Pnative2asciiIncludeTests, -Pnative2asciiOut, -Pnative2asciiEncoding"
+
+    doLast {
+        def srcMain = project.hasProperty('native2asciiSrcDir') ? file(project.property('native2asciiSrcDir').toString()) : file('src/main/resources')
+        def includeTests = project.hasProperty('native2asciiIncludeTests') && project.property('native2asciiIncludeTests').toString().toLowerCase() == 'true'
+        def srcTest = file('src/test/resources')
+        def outRoot = project.hasProperty('native2asciiOut') ? file(project.property('native2asciiOut').toString()) : file("${buildDir}/archives/i18n-ascii")
+        def inputEncoding = project.hasProperty('native2asciiEncoding') ? project.property('native2asciiEncoding').toString() : 'UTF-8'
+
+        if (!srcMain.exists()) {
+            println "native2ascii: source resources dir not found: ${srcMain.absolutePath}"
+            return
+        }
+        outRoot.mkdirs()
+        println "native2ascii: converting properties from ${srcMain} (encoding=${inputEncoding}) -> ${outRoot}"
+
+        def escapeLine = { String line ->
+            def sb = new StringBuilder()
+            for (int i = 0; i < line.length(); i++) {
+                char ch = line.charAt(i)
+                int code = (int) ch
+                if (code > 127) {
+                    sb.append(String.format("\\u%04x", code))
+                } else {
+                    if (ch == '\\') {
+                        if (i + 1 < line.length()) {
+                            char nextChar = line.charAt(i + 1)
+                            if (nextChar == 'u') {
+                                sb.append(ch)
+                                continue
+                            } else if (nextChar in ['n', 't', 'r', 'f', 'b', '"', "'", '\\']) {
+                                sb.append(ch)
+                                continue
+                            }
+                        }
+                        sb.append('\\\\')
+                    } else {
+                        sb.append(ch)
+                    }
+                }
+            }
+            return sb.toString()
+        }
+
+        def processDir = { File sourceDir ->
+            fileTree(dir: sourceDir).matching { include '**/*.properties' }.each { File f ->
+                def rel = sourceDir.toPath().relativize(f.toPath()).toString().replace('\\', '/')
+                def destFile = new File(outRoot, rel)
+                destFile.parentFile.mkdirs()
+
+                def content = f.getText(inputEncoding)
+                def lines = content.readLines()
+
+                destFile.withWriter('UTF-8') { writer ->
+                    lines.eachWithIndex { line, idx ->
+                        writer.write(escapeLine(line))
+                        if (idx < lines.size() - 1) {
+                            writer.write(System.lineSeparator())
+                        }
+                    }
+                }
+                println "  -> ${rel}"
+            }
+        }
+
+        processDir(srcMain)
+        if (includeTests && srcTest.exists()) {
+            println "native2ascii: also converting test resources from ${srcTest}"
+            processDir(srcTest)
+        }
+
+        println "native2ascii: complete. Output directory: ${outRoot.absolutePath}"
+        println "Tip: run './gradlew native2ascii native2asciiInject' to copy ASCII copies into build/resources/main (if you want tests/run to pick them up)."
+    }
+}
+
+tasks.register('native2asciiInject') {
+    group = 'verification'
+    description = "Copy ASCII-escaped properties (produced by native2ascii) into build/resources/main"
+    dependsOn 'native2ascii', 'processResources'
+    doLast {
+        def asciiDir = project.hasProperty('native2asciiOut') ? file(project.property('native2asciiOut').toString()) : file("${buildDir}/archives/i18n-ascii")
+        if (!asciiDir.exists()) {
+            println "native2asciiInject: ascii dir not found: ${asciiDir.absolutePath}. Run native2ascii first."
+            return
+        }
+        def target = file("${buildDir}/resources/main")
+        target.mkdirs()
+        copy {
+            from asciiDir
+            into target
+        }
+        println "native2asciiInject: copied ASCII properties into ${target.absolutePath}"
+    }
+}
+
+tasks.register('scp') {
+    group = 'Deployment'
+    description = 'Copy built artifacts to remote server via SCP using pscp (Putty). Uses scp.txt for configuration.'
+
+    dependsOn build
+
+    doLast {
+        try {
+            def configFile = file('scp.txt')
+            if (!configFile.exists()) {
+                throw new GradleException("SCP config file 'scp.txt' not found in project root.")
+            }
+
+            def config = new Properties()
+            configFile.withInputStream { config.load(it) }
+
+            def host = config.getProperty('host')
+            def portStr = config.getProperty('port', '22')
+            def user = config.getProperty('user')
+            def remoteDir = config.getProperty('remote_dir')
+            def password = config.getProperty('password')
+
+            if (!host || !user || !remoteDir) {
+                throw new GradleException('SCP task requires host, user and remote_dir properties in scp.txt')
+            }
+
+            def filesToCopy = []
+            if (packageType == 'jar') {
+                filesToCopy = fileTree(dir: "${buildDir}/libs").matching { include '*.jar' }.files
+            } else {
+                filesToCopy = fileTree(dir: "${buildDir}/libs").matching { include '*.war' }.files
+            }
+
+            if (filesToCopy.empty) {
+                throw new GradleException('No built artifacts found to copy. Run build first.')
+            }
+
+            println "Found ${filesToCopy.size()} file(s) to transfer."
+            println "Connecting to ${user}@${host}:${portStr}..."
+            println "Target directory on server: ${remoteDir}"
+
+            filesToCopy.each { file ->
+                println "Transferring ${file.name}..."
+
+                String[] pscpCommand
+                if (password) {
+                    pscpCommand = [
+                            'pscp',
+                            '-P', portStr,
+                            '-pw', password,
+                            file.absolutePath,
+                            "${user}@${host}:${remoteDir}"
+                    ]
+                } else {
+                    pscpCommand = [
+                            'pscp',
+                            '-P', portStr,
+                            file.absolutePath,
+                            "${user}@${host}:${remoteDir}"
+                    ]
+                }
+
+                def procRes = runCommand(pscpCommand as List, projectDir)
+                if (procRes.exit == 0) {
+                    println "Successfully transferred ${file.name} to server."
+                } else {
+                    println "PSCP command failed with exit code ${procRes.exit}."
+                    println "Error output:\n${procRes.out}"
+                    throw new GradleException("Failed to transfer file ${file.name} via PSCP. See output above.")
+                }
+            }
+
+            println "SCP task completed successfully. Files uploaded to ${user}@${host}:${remoteDir}"
+
+        } catch (Exception e) {
+            throw new GradleException("SCP task failed: ${e.message}", e)
+        }
+    }
+}

@@ -1,0 +1,1 @@
+C:\Уник\2 course\OPI\lab3\demo\src\main\java\org\ifmo\ru\lab4back\beans\User.java
