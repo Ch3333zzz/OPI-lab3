@@ -17,7 +17,7 @@ public class FunctionalTest {
     static String sharedLogin = null;
     static String sharedPassword = null;
 
-    BrowserContext context;
+    BrowserContext context1;
     Page page;
 
     @BeforeAll
@@ -39,8 +39,8 @@ public class FunctionalTest {
 
     @BeforeEach
     void createContextAndPage() {
-        context = browser.newContext();
-        page = context.newPage();
+        context1 = browser.newContext();
+        page = context1.newPage();
         page.setViewportSize(1920, 1080);
         page.setDefaultTimeout(30000);
         page.setDefaultNavigationTimeout(30000);
@@ -76,13 +76,13 @@ public class FunctionalTest {
         try {
             logoutIfNeeded();
         } finally {
-            if (context != null) {
+            if (context1 != null) {
                 try {
-                    context.close();
+                    context1.close();
                 } catch (Exception e) {
                     System.err.println("Failed to close context: " + e.getMessage());
                 } finally {
-                    context = null;
+                    context1 = null;
                     page = null;
                 }
             }
@@ -92,7 +92,7 @@ public class FunctionalTest {
 
     @AfterEach
     void closeContext() {
-        if (context != null) context.close();
+        if (context1 != null) context1.close();
     }
 
     @Test

@@ -72,7 +72,7 @@ def runCommand(List<String> cmd, File workingDir = projectDir, boolean captureOu
 
 tasks.register('doc') {
     group = 'verification'
-    description = 'Generate checksums (MD5 & SHA-1) for project files and write checksums-md5.txt/checksums-sha1.txt'
+    description = 'Generate checksums (MD5 & SHA-1) for project files and write checksums-md5.txt/checksums-sha1.txt and MANIFEST.MF'
 
     doLast {
         def toHex = { byte[] bytes -> bytes.collect { String.format('%02x', it & 0xff) }.join() }
@@ -118,6 +118,29 @@ tasks.register('doc') {
         println "Generated ${md5File.absolutePath} and ${sha1File.absolutePath}"
         println "Project aggregate MD5: ${aggMd5}"
         println "Project aggregate SHA-1: ${aggSha1}"
+
+        try {
+            def manifestFile = new File(outDir, 'MANIFEST.MF')
+
+            def implTitle = (project.name ?: 'UNKNOWN').toString().replaceAll(/[\r\n]+/, ' ')
+            def implVer = (project.version ?: 'UNKNOWN').toString().replaceAll(/[\r\n]+/, ' ')
+            def gradleVer = gradle.gradleVersion.toString().replaceAll(/[\r\n]+/, ' ')
+            def createdAt = new Date().format("yyyy-MM-dd'T'HH:mm:ssZ")
+
+            manifestFile.withWriter('UTF-8') { w ->
+                w.println("Manifest-Version: 1.0")
+                w.println("Implementation-Title: ${implTitle}")
+                w.println("Implementation-Version: ${implVer}")
+                w.println("Project-MD5: ${aggMd5 ?: 'UNKNOWN'}")
+                w.println("Project-SHA1: ${aggSha1 ?: 'UNKNOWN'}")
+                w.println("Created-By: Gradle ${gradleVer}")
+                w.println("Created-At: ${createdAt}")
+            }
+
+            println "Wrote manifest: ${manifestFile.absolutePath}"
+        } catch (Exception e) {
+            println "Failed to write MANIFEST.MF: ${e.message}"
+        }
     }
 }
 
@@ -178,7 +201,6 @@ clean {
     }
 }
 
-def packageType = project.hasProperty('packageType') ? project.property('packageType').toString().toLowerCase() : 'war'
 def mainClassName = project.hasProperty('mainClass') ? project.property('mainClass').toString() : null
 
 
@@ -190,10 +212,13 @@ tasks.named('war') {
     from("${buildDir}/archives/checksums") { into 'docs/checksums' }
     from(tasks.named('javadoc')) { into 'docs/javadoc' }
 
-    manifest {
-        attributes('Implementation-Title': project.name, 'Implementation-Version': project.version,
+    doFirst {
+        manifest.attributes(
+                'Implementation-Title': project.name,
+                'Implementation-Version': project.version,
                 'Project-MD5': project.hasProperty('projectMd5') ? project.projectMd5 : 'UNKNOWN',
-                'Project-SHA1': project.hasProperty('projectSha1') ? project.projectSha1 : 'UNKNOWN')
+                'Project-SHA1': project.hasProperty('projectSha1') ? project.projectSha1 : 'UNKNOWN'
+        )
     }
 }
 
@@ -349,13 +374,7 @@ tasks.register('playMusic') {
 
             def os = System.getProperty('os.name').toLowerCase()
             List cmd
-            if (os.contains('win')) {
-                cmd = ['cmd', '/c', 'start', '""', "\"${f.absolutePath}\""]
-            } else if (os.contains('mac')) {
-                cmd = ['open', f.absolutePath]
-            } else {
-                cmd = ['xdg-open', f.absolutePath]
-            }
+            cmd = ['cmd', '/c', 'start', '""', "\"${f.absolutePath}\""]
 
             println "Running: ${cmd.join(' ')}"
             new ProcessBuilder(cmd).inheritIO().start()
@@ -425,8 +444,6 @@ tasks.register('report') {
                     } else {
                         println "No changes to commit"
                     }
-                } else {
-                    println "Not a Git repository, skipping Git operations"
                 }
             }
 
@@ -572,7 +589,7 @@ gradle.taskGraph.afterTask { Task task, TaskState state ->
 
 tasks.register('team') {
     group = 'Team'
-    description = 'Get 3 previous revisions from git, build each by invoking the "build" Gradle task in a worktree, collect resulting jars and pack into a zip.'
+    description = 'Get 3 previous revisions from git, build each by invoking the "war" Gradle task in a worktree, collect resulting wars and pack into a zip.'
 
     doLast {
         try {
@@ -592,11 +609,11 @@ tasks.register('team') {
 
             def worktreeParentDir = file("${buildDir}/team-worktrees")
             worktreeParentDir.mkdirs()
-            def jarsDir = file("${buildDir}/team-jars")
-            jarsDir.mkdirs()
+            def warsDir = file("${buildDir}/team-wars")
+            warsDir.mkdirs()
 
             def worktreeDirs = []
-            def collectedJars = []
+            def collectedWars = []
             def gradleCmd = findGradleCmd()
 
             try {
@@ -612,40 +629,43 @@ tasks.register('team') {
                         return
                     }
 
-                    println "Building revision ${index + 1}/3: ${shortId} (running '${gradleCmd} build')"
-                    def buildRes = runCommand([gradleCmd, 'build', '--no-daemon', '--console=plain'], worktreeDir)
+                    println "Building revision ${index + 1}/3: ${shortId} (running '${gradleCmd} clean war')"
+                    def buildRes = runCommand([gradleCmd, 'clean', 'war', '--no-daemon', '--console=plain'], worktreeDir)
                     if (buildRes.exit != 0) {
-                        println "Warning: build failed for ${shortId} (exit=${buildRes.exit}). Continuing with next revision."
+                        println "Warning: war build failed for ${shortId} (exit=${buildRes.exit}). Continuing with next revision."
                     }
 
-                    def sourceJarDir = new File(worktreeDir, 'build/libs')
-                    if (sourceJarDir.exists()) {
-                        sourceJarDir.eachFileMatch(FileType.FILES, ~/.*\.jar/) { jarFile ->
-                            def targetJarFile = new File(jarsDir, "revision-${index}-${shortId}-${jarFile.name}")
-                            jarFile.withInputStream { input ->
-                                targetJarFile.withOutputStream { output ->
+                    def foundAny = false
+                    worktreeDir.eachFileRecurse(FileType.FILES) { f ->
+                        if (f.name.toLowerCase().endsWith('.war')) {
+                            def targetWarFile = new File(warsDir, "revision-${index}-${shortId}-${f.name}")
+                            f.withInputStream { input ->
+                                targetWarFile.withOutputStream { output ->
                                     output << input
                                 }
                             }
-                            collectedJars << targetJarFile
-                            println "Copied ${jarFile.name} -> ${targetJarFile.name}"
+                            collectedWars << targetWarFile
+                            println "Copied WAR ${f.path} -> ${targetWarFile.name}"
+                            foundAny = true
                         }
-                    } else {
-                        println "No build/libs directory for ${shortId} (maybe build failed)."
+                    }
+
+                    if (!foundAny) {
+                        println "No .war artifacts found for ${shortId} (maybe build failed or produced no war)."
                     }
                 }
 
-                if (collectedJars.size() > 0) {
-                    def zipFile = file("${buildDir}/team-revisions.zip")
+                if (collectedWars.size() > 0) {
+                    def zipFile = file("${buildDir}/team-revisions-wars.zip")
                     ant.zip(destfile: zipFile) {
-                        fileset(dir: jarsDir)
+                        fileset(dir: warsDir)
                     }
 
                     println "Team task completed successfully"
                     println "Zip archive created at: ${zipFile.absolutePath}"
-                    println "Included ${collectedJars.size()} jar files from ${targetCommits.size()} revisions"
+                    println "Included ${collectedWars.size()} war files from ${targetCommits.size()} revisions"
                 } else {
-                    println "No jar files were collected from any revision."
+                    println "No war files were collected from any revision."
                 }
 
             } finally {
@@ -660,7 +680,7 @@ tasks.register('team') {
                 }
 
                 try { worktreeParentDir.deleteDir() } catch (ignored) {}
-                try { jarsDir.deleteDir() } catch (ignored) {}
+                try { warsDir.deleteDir() } catch (ignored) {}
             }
 
         } catch (Exception e) {
@@ -669,15 +689,15 @@ tasks.register('team') {
     }
 }
 
+
 tasks.register('alt') {
     group = 'Build'
-    description = 'Create alternative version (variable and class names +1) and run build on it.'
+    description = 'Create alternative version (changed Class and var names) and build WAR in the copy.'
 
     doLast {
         def altProjectDir = file("${buildDir}/alt-project")
         if (altProjectDir.exists()) altProjectDir.deleteDir()
         altProjectDir.mkdirs()
-
         println "Creating alternative project copy at: ${altProjectDir.absolutePath}"
 
         ant.copy(todir: altProjectDir) {
@@ -698,89 +718,193 @@ tasks.register('alt') {
             }
         }
 
+        // helpers: keywords / standard classes
         def javaKeywords = [
-                'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char', 'class',
-                'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'final',
-                'finally', 'float', 'for', 'goto', 'if', 'implements', 'import', 'instanceof', 'int',
-                'interface', 'long', 'native', 'new', 'package', 'private', 'protected', 'public',
-                'return', 'short', 'static', 'strictfp', 'super', 'switch', 'synchronized', 'this',
-                'throw', 'throws', 'transient', 'try', 'void', 'volatile', 'while', 'true', 'false', 'null'
-        ]
+                'abstract','assert','boolean','break','byte','case','catch','char','class',
+                'const','continue','default','do','double','else','enum','extends','final',
+                'finally','float','for','goto','if','implements','import','instanceof','int',
+                'interface','long','native','new','package','private','protected','public',
+                'return','short','static','strictfp','super','switch','synchronized','this',
+                'throw','throws','transient','try','void','volatile','while','true','false','null'
+        ] as Set
 
-        def commonMethods = ['toString', 'equals', 'hashCode', 'getClass', 'notify', 'notifyAll', 'wait']
-        def standardClasses = ['String', 'System', 'Object', 'Integer', 'Double', 'Float', 'Long', 'Boolean']
+        def standardClasses = ['String','System','Object','Integer','Double','Float','Long','Boolean','List','Map','Set'] as Set
 
-        def safeRename = { String name ->
-            if (javaKeywords.contains(name) || commonMethods.contains(name) || standardClasses.contains(name)) {
-                return name
-            }
+        def safeTypeRename = { String name ->
+            if (!name) return name
+            if (javaKeywords.contains(name) || standardClasses.contains(name)) return name
+            if (!(name[0] in 'A'..'Z')) return name
             return name + '1'
         }
 
-        javaFiles.each { f ->
-            def content = f.getText('UTF-8')
-
-            content = content.replaceAll(/\b(class|interface|enum)\s+([A-Z][A-Za-z0-9_]*)\b/) { match ->
-                def keyword = match[1]
-                def className = match[2]
-                "$keyword ${safeRename(className)}"
-            }
-
-            content = content.replaceAll(/\b([A-Za-z_][A-Za-z0-9_<>\[\]]+)\s+([a-z][A-Za-z0-9_]*)\s*([,;=)]|$)/) { match ->
-                def type = match[1]
-                def varName = match[2]
-                def punctuation = match[3]
-                "$type ${safeRename(varName)}$punctuation"
-            }
-
-            content = content.replaceAll(/\b([a-z][A-Za-z0-9_]*)\b(?!\.|\(\))()/) { match ->
-                def varName = match[1]
-                safeRename(varName)
-            }
-
-            f.write(content, 'UTF-8')
+        def safeVarRename = { String name ->
+            if (!name) return name
+            if (javaKeywords.contains(name)) return name
+            if (!(name[0] in 'a'..'z')) return name + '1'
+            return name + '1'
         }
 
+        //build global map of type renames (Class/Interface/Enum)
+        def globalTypeRenameMap = [:] as Map<String,String>
         javaFiles.each { f ->
             def content = f.getText('UTF-8')
-            def matcher = content =~ /\bclass\s+([A-Z][A-Za-z0-9_]*)/
-            if (matcher.find()) {
-                def className = matcher.group(1)
-                if (!javaKeywords.contains(className) && !standardClasses.contains(className)) {
-                    def newFileName = safeRename(className) + '.java'
-                    def newFile = new File(f.parentFile, newFileName)
-                    if (f.renameTo(newFile)) {
-                        println "Renamed ${f.name} to ${newFile.name}"
+            def m = content =~ /\b(class|interface|enum)\s+([A-Z][A-Za-z0-9_]*)\b/
+            m.each { mm ->
+                def oldName = mm[2]
+                def newName = safeTypeRename(oldName)
+                if (oldName != newName) globalTypeRenameMap[oldName] = newName
+            }
+        }
+
+        //detect class-level fields and plan variable renames
+        def globalVarRenameMap = [:] as Map<String,String>
+        javaFiles.each { f ->
+            def lines = f.readLines('UTF-8')
+            int depth = 0
+            boolean inBlockComment = false
+            lines.each { rawLine ->
+                def line = rawLine
+                if (line.contains('/*')) inBlockComment = true
+                if (inBlockComment) {
+                    if (line.contains('*/')) inBlockComment = false
+                } else {
+                    def noComment = line.replaceAll(/\/\/.*$/, '')
+                    depth += noComment.count('{') as int
+                    if (depth == 1) {
+                        def fieldMatcher = (noComment =~ /^\s*(?:@\S+\s*)*(?:public|protected|private|static|final|transient|volatile|\s)*\s*([A-Za-z0-9_<>\[\]\.? ,]+)\s+([a-z][A-Za-z0-9_]*)\s*(?:=|;)/)
+                        if (fieldMatcher.find()) {
+                            def varName = fieldMatcher.group(2)
+                            if (!javaKeywords.contains(varName) && !globalVarRenameMap.containsKey(varName)) {
+                                def newVar = safeVarRename(varName)
+                                if (varName != newVar) globalVarRenameMap[varName] = newVar
+                            }
+                        }
                     }
+                    depth -= noComment.count('}') as int
                 }
             }
         }
 
+        def combinedRenameMap = [:] as Map<String,String>
+        combinedRenameMap.putAll(globalTypeRenameMap)
+        combinedRenameMap.putAll(globalVarRenameMap)
+
+        if (!globalTypeRenameMap.isEmpty()) {
+            println "Planned type renames (global):"
+            globalTypeRenameMap.each { k, v -> println "  ${k} -> ${v}" }
+        } else {
+            println "No type renames planned."
+        }
+        if (!globalVarRenameMap.isEmpty()) {
+            println "Planned variable renames (class-level):"
+            globalVarRenameMap.each { k, v -> println "  ${k} -> ${v}" }
+        } else {
+            println "No class-level variable renames planned."
+        }
+
+        def textExtensions = ['java','xml','jsp','jspx','properties','html','htm','js','css','sql','yml','yaml','txt']
+        def textFiles = []
+        altProjectDir.eachFileRecurse(FileType.FILES) { f ->
+            def ext = f.name.lastIndexOf('.') >= 0 ? f.name.substring(f.name.lastIndexOf('.') + 1).toLowerCase() : ''
+            if (textExtensions.contains(ext)) textFiles << f
+        }
+
+        textFiles.each { file ->
+            def lines = file.readLines('UTF-8')
+            def outLines = []
+            lines.each { line ->
+                def trimmed = line.trim()
+                if (trimmed ==~ /^package\s+/) {
+                    outLines << line
+                    return
+                }
+
+                if (trimmed ==~ /^import\s+/) {
+                    def leading = (line =~ /^(\s*)/)[0][1]
+                    def afterImport = line.replaceFirst(/^\s*import\s+/, '').replaceFirst(/;\s*$/, '').trim()
+                    if (afterImport.startsWith('jakarta.') || afterImport.startsWith('java.') || afterImport.startsWith('javax.')) {
+                        outLines << line
+                        return
+                    }
+                    try {
+                        def lastDot = afterImport.lastIndexOf('.')
+                        def lastSeg = lastDot >= 0 ? afterImport.substring(lastDot + 1) : afterImport
+                        if (globalTypeRenameMap.containsKey(lastSeg) && (lastSeg[0] in 'A'..'Z')) {
+                            def prefix = lastDot >= 0 ? afterImport.substring(0, lastDot) : ''
+                            def newImport = prefix ? "import ${prefix}.${globalTypeRenameMap[lastSeg]};" : "import ${globalTypeRenameMap[lastSeg]};"
+                            outLines << leading + newImport
+                        } else {
+                            outLines << line
+                        }
+                    } catch (Exception e) {
+                        outLines << line
+                    }
+                    return
+                }
+
+                def processed = line
+                combinedRenameMap.each { oldName, newName ->
+                    try {
+                        def pat = java.util.regex.Pattern.compile("\\b" + java.util.regex.Pattern.quote(oldName) + "\\b")
+                        processed = pat.matcher(processed).replaceAll(newName)
+                    } catch (Exception e) {
+                        processed = processed.replace(oldName, newName)
+                    }
+                }
+                outLines << processed
+            }
+            file.withWriter('UTF-8') { w -> outLines.each { w.writeLine(it) } }
+        }
+
+        def newJavaFiles = []
+        if (srcRoot.exists()) {
+            srcRoot.eachFileRecurse(FileType.FILES) { f ->
+                if (f.name.endsWith('.java')) newJavaFiles << f
+            }
+        }
+        newJavaFiles.each { f ->
+            try {
+                def content = f.getText('UTF-8')
+                def matcher = content =~ /\b(public\s+)?(class|interface|enum)\s+([A-Z][A-Za-z0-9_]*)\b/
+                if (matcher.find()) {
+                    def className = matcher.group(3)
+                    def newFileName = className + '.java'
+                    if (f.name != newFileName) {
+                        def newFile = new File(f.parentFile, newFileName)
+                        if (f.renameTo(newFile)) println "Renamed ${f.name} to ${newFile.name}"
+                        else println "Failed to rename ${f.name} -> ${newFileName}"
+                    }
+                }
+            } catch (Exception e) {
+                println "Error renaming ${f}: ${e.message}"
+            }
+        }
+
         def gradleCmd = findGradleCmd()
-        def buildOut = runCommand([gradleCmd, 'build', '--no-daemon', '--console=plain'], altProjectDir)
+        def buildOut = runCommand([gradleCmd, 'clean', 'war', '--no-daemon', '--console=plain'], altProjectDir)
         println buildOut.out
 
         def altLibsDir = new File(altProjectDir, 'build/libs')
-        def targetDir = file("${buildDir}/alt-jars")
+        def targetDir = file("${buildDir}/alt-wars")
         targetDir.mkdirs()
-
         if (altLibsDir.exists()) {
-            altLibsDir.eachFileMatch(FileType.FILES, ~/.*\.jar/) { jarFile ->
-                def target = new File(targetDir, "alt-${jarFile.name}")
-                jarFile.withInputStream { input -> target.withOutputStream { out -> out << input } }
-                println "Copied alt jar: ${target.absolutePath}"
+            altLibsDir.eachFileMatch(FileType.FILES, ~/.*\.war/) { warFile ->
+                def target = new File(targetDir, "alt-${warFile.name}")
+                warFile.withInputStream { input -> target.withOutputStream { out -> out << input } }
+                println "Copied alt war: ${target.absolutePath}"
             }
         }
 
         if (buildOut.exit != 0) {
-            println "Alternative build completed with errors, but jars were collected if any were created"
+            println "Alternative WAR build completed with errors, but WARs were copied if any were created"
         } else {
-            println "Alternative build completed successfully"
+            println "Alternative WAR build completed successfully"
         }
 
-        println "Alt task finished. Alternative jars are in: ${targetDir.absolutePath}"
+        println "Alt task finished. Alternative WARs are in: ${targetDir.absolutePath}"
     }
 }
+
 
 tasks.register('diff') {
     group = 'verification'
@@ -792,10 +916,9 @@ tasks.register('diff') {
             return [exit: res.exit, out: res.out]
         }
 
-        def paramsFilePath = project.hasProperty('diffParamsFile') ? project.property('diffParamsFile').toString() : 'diff-params.txt'
+        def paramsFilePath = 'diff-params.txt'
         def paramsFile = file(paramsFilePath)
-        def commitMessage = project.hasProperty('diffCommitMessage') ? project.property('diffCommitMessage').toString() : "Auto-commit: workspace changes - ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
-        def noCommit = project.hasProperty('diffNoCommit') && project.property('diffNoCommit').toString().toLowerCase() == 'true'
+        def commitMessage = "Auto-commit: workspace changes - ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
 
         def statusChk = runGit(['git', 'rev-parse', '--is-inside-work-tree'])
         if (statusChk.exit != 0 || statusChk.out != 'true') {
@@ -868,12 +991,7 @@ tasks.register('diff') {
             return
         }
 
-        println "\nNo conflicts with watched classes. Proceeding to git add & commit (unless diffNoCommit=true)."
-
-        if (noCommit) {
-            println "diffNoCommit=true => dry run. Skipping actual git add & commit."
-            return
-        }
+        println "\nNo conflicts with watched classes. Proceeding to git add & commit."
 
         def addRes = runGit(['git', 'add', '-A'])
         if (addRes.exit != 0) {
@@ -902,37 +1020,23 @@ tasks.register('diff') {
 
 tasks.register('env') {
     group = 'verification'
-    description = "Build and run the project's main class in alternative environments. Params file format described below."
+    description = "For each env in env-params.txt build WAR using JVM args from that env line. " +
+            "Format: name | javaVersion | jvmArgs | appArgs (appArgs ignored for WAR build)."
 
     dependsOn 'compile'
 
     doLast {
-        def paramsFilePath = project.hasProperty('envParamsFile') ? project.property('envParamsFile').toString() : 'env-params.txt'
+        def paramsFilePath = 'env-params.txt'
         def paramsFile = file(paramsFilePath)
-        def dryRun = project.hasProperty('envDryRun') && project.property('envDryRun').toString().toLowerCase() == 'true'
-        def defaultMain = project.hasProperty('mainClass') ? project.property('mainClass').toString() : (binding.hasVariable('mainClassName') ? mainClassName : null)
-
-        if (!defaultMain) {
-            println "No main class configured. Provide -PmainClass=your.MainClass or set 'mainClass' project property."
-            return
-        }
+        def gradleCmd = findGradleCmd()
 
         if (!paramsFile.exists()) {
             println "Params file not found: ${paramsFile.absolutePath}"
-            println "Create file with example content (see task help)."
             return
         }
 
-        def toolchains = null
-        def JavaLanguageVersion = null
-        try {
-            toolchains = project.extensions.findByName('javaToolchains') ?: project.javaToolchains
-            JavaLanguageVersion = org.gradle.jvm.toolchain.JavaLanguageVersion
-        } catch (Exception ignored) {}
-
         println "Using params file: ${paramsFile.absolutePath}"
         def lines = paramsFile.readLines('UTF-8').collect { it.trim() }.findAll { it && !it.startsWith('#') }
-
         if (lines.isEmpty()) {
             println "No environment entries found in ${paramsFilePath}"
             return
@@ -941,7 +1045,6 @@ tasks.register('env') {
         int idx = 0
         lines.each { line ->
             idx++
-
             def parts = line.split(/\|/, -1).collect { it?.trim() ?: '' }
 
             def envName = parts.size() > 0 && parts[0] ? parts[0] : "env-${idx}"
@@ -950,56 +1053,51 @@ tasks.register('env') {
             def appArgs = parts.size() > 3 && parts[3] ? parts[3].tokenize() : []
 
             println "\n=== ENV: ${envName} ==="
-            println "Requested Java: ${javaVer ?: 'default system Java'}"
+            println "Requested Java: ${javaVer ?: 'default system Java (no automatic switch performed)'}"
             println "JVM args: ${jvmArgs}"
-            println "App args: ${appArgs}"
+            println "App args (ignored for WAR): ${appArgs}"
 
-            if (dryRun) {
-                println "(dry run) Skipping actual javaexec for ${envName}"
-                return
-            }
+            def cmdArgs = [gradleCmd, 'clean', 'war', '--no-daemon', '--console=plain']
+            def jvmArgsString = jvmArgs.join(' ').trim()
 
             try {
-                project.javaexec { spec ->
-                    spec.main = defaultMain
-                    spec.classpath = sourceSets.main.runtimeClasspath
-                    if (jvmArgs) spec.jvmArgs = jvmArgs
-                    if (appArgs) spec.args = appArgs
-
-                    if (javaVer && toolchains != null && JavaLanguageVersion != null) {
-                        try {
-                            def verNum = javaVer.isInteger() ? Integer.parseInt(javaVer) : Integer.parseInt(javaVer.replaceAll('[^0-9]', ''))
-                            spec.javaLauncher = toolchains.launcherFor { languageVersion = JavaLanguageVersion.of(verNum) }
-                            println "Launched with toolchain Java ${verNum} (if available)"
-                        } catch (Exception e) {
-                            println "Could not obtain toolchain launcher for Java '${javaVer}': ${e.message}"
-                            println "Falling back to Gradle's default java for execution."
-                        }
+                println "Starting build for ${envName}..."
+                def execRes = exec {
+                    workingDir project.projectDir
+                    if (jvmArgsString) {
+                        environment 'JAVA_TOOL_OPTIONS', jvmArgsString
+                        environment 'GRADLE_OPTS', jvmArgsString
                     }
-
-                    spec.standardOutput = System.out
-                    spec.errorOutput = System.err
+                    commandLine = cmdArgs
+                    standardOutput = System.out
+                    errorOutput = System.err
+                    ignoreExitValue = true
                 }
 
-                println "Finished run for ${envName}"
+                if (execRes.exitValue == 0) {
+                    println "WAR built successfully for ${envName}. File (default): ${buildDir}/libs/${project.name}-${project.version}.war"
+                } else {
+                    println "Build failed for ${envName} (exit ${execRes.exitValue}). See output above."
+                }
             } catch (Exception e) {
-                println "Run failed for ${envName}: ${e.class.name}: ${e.message}"
+                println "Exception while building for ${envName}: ${e.class.name}: ${e.message}"
             }
         }
+
+        println "\nAll env entries processed."
     }
 }
 
+
 tasks.register('native2ascii') {
     group = 'verification'
-    description = "Convert .properties (UTF-8) -> ASCII-escaped copies (\\uXXXX). " +
-            "Options: -Pnative2asciiSrcDir, -Pnative2asciiIncludeTests, -Pnative2asciiOut, -Pnative2asciiEncoding"
+    description = "Convert .properties (UTF-8) -> ASCII-escaped copies (\\uXXXX). "
 
     doLast {
-        def srcMain = project.hasProperty('native2asciiSrcDir') ? file(project.property('native2asciiSrcDir').toString()) : file('src/main/resources')
-        def includeTests = project.hasProperty('native2asciiIncludeTests') && project.property('native2asciiIncludeTests').toString().toLowerCase() == 'true'
+        def srcMain = file('src/main/resources')
         def srcTest = file('src/test/resources')
-        def outRoot = project.hasProperty('native2asciiOut') ? file(project.property('native2asciiOut').toString()) : file("${buildDir}/archives/i18n-ascii")
-        def inputEncoding = project.hasProperty('native2asciiEncoding') ? project.property('native2asciiEncoding').toString() : 'UTF-8'
+        def outRoot = file("${buildDir}/archives/i18n-ascii")
+        def inputEncoding = 'UTF-8'
 
         if (!srcMain.exists()) {
             println "native2ascii: source resources dir not found: ${srcMain.absolutePath}"
@@ -1058,36 +1156,14 @@ tasks.register('native2ascii') {
         }
 
         processDir(srcMain)
-        if (includeTests && srcTest.exists()) {
+        if (srcTest.exists()) {
             println "native2ascii: also converting test resources from ${srcTest}"
             processDir(srcTest)
         }
 
         println "native2ascii: complete. Output directory: ${outRoot.absolutePath}"
-        println "Tip: run './gradlew native2ascii native2asciiInject' to copy ASCII copies into build/resources/main (if you want tests/run to pick them up)."
     }
 }
-
-tasks.register('native2asciiInject') {
-    group = 'verification'
-    description = "Copy ASCII-escaped properties (produced by native2ascii) into build/resources/main"
-    dependsOn 'native2ascii', 'processResources'
-    doLast {
-        def asciiDir = project.hasProperty('native2asciiOut') ? file(project.property('native2asciiOut').toString()) : file("${buildDir}/archives/i18n-ascii")
-        if (!asciiDir.exists()) {
-            println "native2asciiInject: ascii dir not found: ${asciiDir.absolutePath}. Run native2ascii first."
-            return
-        }
-        def target = file("${buildDir}/resources/main")
-        target.mkdirs()
-        copy {
-            from asciiDir
-            into target
-        }
-        println "native2asciiInject: copied ASCII properties into ${target.absolutePath}"
-    }
-}
-
 tasks.register('scp') {
     group = 'Deployment'
     description = 'Copy built artifacts to remote server via SCP using pscp (Putty). Uses scp.txt for configuration.'
@@ -1115,11 +1191,7 @@ tasks.register('scp') {
             }
 
             def filesToCopy = []
-            if (packageType == 'jar') {
-                filesToCopy = fileTree(dir: "${buildDir}/libs").matching { include '*.jar' }.files
-            } else {
-                filesToCopy = fileTree(dir: "${buildDir}/libs").matching { include '*.war' }.files
-            }
+            filesToCopy = fileTree(dir: "${buildDir}/libs").matching { include '*.war' }.files
 
             if (filesToCopy.empty) {
                 throw new GradleException('No built artifacts found to copy. Run build first.')
