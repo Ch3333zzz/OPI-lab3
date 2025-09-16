@@ -15,6 +15,20 @@ repositories {
     mavenCentral()
 }
 
+sourceSets {
+    test {
+        java.srcDirs = [
+                'src/test/java/org/ifmo/ru/lab4back/EJB',
+                'src/test/java/org/ifmo/ru/lab4back/beans'
+        ]
+    }
+
+    functionalTest {
+        java.srcDir 'src/test/java/org/ifmo/ru/lab4back/functional'
+    }
+}
+
+
 ext {
     sourceDir = project.hasProperty('sourceDir') ? project.sourceDir : 'src/main/java'
     outputDir = project.hasProperty('outputDir') ? project.outputDir : 'build/classes/main'
@@ -51,6 +65,10 @@ dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
     testImplementation 'org.mockito:mockito-core:5.16.1'
     testImplementation 'org.mockito:mockito-junit-jupiter:5.16.1'
+}
+configurations {
+    functionalTestImplementation.extendsFrom testImplementation
+    functionalTestRuntimeOnly.extendsFrom testRuntimeOnly
 }
 
 def runCommand(List<String> cmd, File workingDir = projectDir, boolean captureOutput = true) {
@@ -314,7 +332,45 @@ tasks.register('installPlaywrightBrowsers', JavaExec) {
 }
 
 test {
-    useJUnitPlatform { }
+    useJUnitPlatform()
+    testLogging {
+        events "passed", "skipped", "failed", "standardOut", "standardError"
+        exceptionFormat "full"
+        showExceptions true
+        showCauses true
+        showStackTraces true
+    }
+    reports {
+        html.required.set(true)
+        junitXml.required.set(true)
+        junitXml.outputLocation.set(layout.buildDirectory.dir("reports/tests/xml"))
+    }
+    afterSuite { desc, result ->
+        if (!desc.parent) {
+            println "\nUnit Test Results:"
+            println "Passed: ${result.successfulTestCount}"
+            println "Skipped: ${result.skippedTestCount}"
+            println "Failed: ${result.failedTestCount}"
+            println "Total: ${result.testCount}"
+            if (result.failedTestCount > 0) {
+                throw new GradleException("${result.failedTestCount} unit tests failed!")
+            }
+        }
+    }
+}
+
+tasks.register('functionalTest', Test) {
+    description = 'Runs functional tests.'
+    group = 'verification'
+
+    dependsOn compileFunctionalTestJava
+    mustRunAfter test
+
+    testClassesDirs = sourceSets.functionalTest.output.classesDirs
+    classpath = sourceSets.functionalTest.runtimeClasspath
+
+    useJUnitPlatform()
+
     testLogging {
         events "passed", "skipped", "failed", "standardOut", "standardError"
         exceptionFormat "full"
@@ -326,23 +382,32 @@ test {
     reports {
         html.required.set(true)
         junitXml.required.set(true)
-        junitXml.outputLocation.set(layout.buildDirectory.dir("reports/tests/xml"))
+        junitXml.outputLocation.set(layout.buildDirectory.dir("reports/functional-tests/xml"))
     }
 
     afterSuite { desc, result ->
         if (!desc.parent) {
-            println "\nTest Results:"
+            println "\nFunctional Test Results:"
             println "Passed: ${result.successfulTestCount}"
             println "Skipped: ${result.skippedTestCount}"
             println "Failed: ${result.failedTestCount}"
             println "Total: ${result.testCount}"
 
             if (result.failedTestCount > 0) {
-                throw new GradleException("${result.failedTestCount} tests failed!")
+                throw new GradleException("${result.failedTestCount} functional tests failed!")
             }
         }
     }
 }
+
+check.dependsOn functionalTest
+
+tasks.named('compileFunctionalTestJava') {
+    dependsOn tasks.named('compileTestJava')
+}
+
+check.dependsOn functionalTest
+
 
 tasks.register('installChrome', JavaExec) {
     group = 'verification'
