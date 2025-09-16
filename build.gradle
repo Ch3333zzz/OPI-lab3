@@ -127,12 +127,17 @@ tasks.register('doc') {
             def gradleVer = gradle.gradleVersion.toString().replaceAll(/[\r\n]+/, ' ')
             def createdAt = new Date().format("yyyy-MM-dd'T'HH:mm:ssZ")
 
+            def runtimeJava = System.getProperty('java.version')?.toString()?.replaceAll(/[\r\n]+/, ' ') ?: 'UNKNOWN'
+            def sourceJava = (project.hasProperty('javaVersion') ? project.javaVersion : javaVersion ?: 'UNKNOWN').toString().replaceAll(/[\r\n]+/, ' ')
+
             manifestFile.withWriter('UTF-8') { w ->
                 w.println("Manifest-Version: 1.0")
                 w.println("Implementation-Title: ${implTitle}")
                 w.println("Implementation-Version: ${implVer}")
                 w.println("Project-MD5: ${aggMd5 ?: 'UNKNOWN'}")
                 w.println("Project-SHA1: ${aggSha1 ?: 'UNKNOWN'}")
+                w.println("Java-Runtime-Version: ${runtimeJava}")
+                w.println("Java-Source-Compatibility: ${sourceJava}")
                 w.println("Created-By: Gradle ${gradleVer}")
                 w.println("Created-At: ${createdAt}")
             }
@@ -141,6 +146,7 @@ tasks.register('doc') {
         } catch (Exception e) {
             println "Failed to write MANIFEST.MF: ${e.message}"
         }
+
     }
 }
 
